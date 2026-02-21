@@ -258,23 +258,23 @@ class ApplyModalPage2(discord.ui.Modal, title="Заявка в семью (2/2)"
         placeholder="примеры эти в саму строчку (лень)"
     )
     q7_micro = discord.ui.TextInput(
-        label="7. Как стреляешь хуйло от 1 до 10?",
+        label="7. Ваш навык стрельбы от 1 до 10?",
         required=True,
         max_length=20,
         placeholder="1 - 10"
     )
     q8_platform = discord.ui.TextInput(
-        label="8. Готовы сменить фраку/имя?",
+        label="8. Готовы ли вы сменить фракциию/фамилию?",
         required=True,
         max_length=30
     )
     q9_exp = discord.ui.TextInput(
-        label="9. Расскажи о себе еблан",
+        label="9. Расскажите о себе",
         required=False,
         max_length=120
     )
     q10_why = discord.ui.TextInput(
-        label="10. Почему хотите к нам крутым?",
+        label="10. Почему хотите к нам?",
         required=True,
         style=discord.TextStyle.paragraph,
         max_length=400
