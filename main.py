@@ -401,7 +401,7 @@ async def on_ready():
 async def setup_apply(interaction: discord.Interaction):
     embed = discord.Embed(
         title="ОСТАВИТЬ ЗАЯВКУ НА ВСТУПЛЕНИЕ В СЕМЬЮ 📋",
-        description="zxc",
+        description="",
         color=discord.Color.dark_green(),
     )
     await interaction.channel.send(embed=embed, view=ApplyPanelView())
