@@ -4,9 +4,13 @@ import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
-from dotenv import load_dotenv
 
-load_dotenv()
+# .env опционально: локально подхватит, на хостинге если файла нет — не упадёт
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
@@ -16,6 +20,9 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))  # 0 если не нуж
 
 # Роль, которую выдаём при принятии
 ACCEPT_ROLE_ID = 1365464185160335530
+
+# Роль "кандидат в фаму" — даём при подаче заявки, снимаем при решении
+CANDIDATE_ROLE_ID = int(os.getenv("CANDIDATE_ROLE_ID", "1474821926236065792"))
 
 # Голосовой канал для обзвона
 CALL_VOICE_CHANNEL_ID = 1471258606820397108
@@ -68,6 +75,30 @@ async def delete_channel_later(channel: discord.TextChannel, delay: int, reason:
         pass
 
 
+async def add_candidate_role(guild: discord.Guild, user_id: int, reason: str):
+    role = guild.get_role(CANDIDATE_ROLE_ID)
+    if role is None:
+        return
+    try:
+        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        if role not in member.roles:
+            await member.add_roles(role, reason=reason)
+    except Exception:
+        pass
+
+
+async def remove_candidate_role(guild: discord.Guild, user_id: int, reason: str):
+    role = guild.get_role(CANDIDATE_ROLE_ID)
+    if role is None:
+        return
+    try:
+        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        if role in member.roles:
+            await member.remove_roles(role, reason=reason)
+    except Exception:
+        pass
+
+
 # ======= Кнопки рассмотрения тикета =======
 class TicketReviewView(discord.ui.View):
     def __init__(self):
@@ -93,7 +124,7 @@ class TicketReviewView(discord.ui.View):
         if role is None:
             return await interaction.followup.send("❌ Роль для выдачи не найдена. Проверь ACCEPT_ROLE_ID.", ephemeral=True)
 
-        # выдаём роль
+        # выдаём роль принятого
         try:
             member = guild.get_member(applicant_id) or await guild.fetch_member(applicant_id)
             await member.add_roles(role, reason=f"Заявка принята модератором {interaction.user}")
@@ -104,6 +135,9 @@ class TicketReviewView(discord.ui.View):
             )
         except Exception as e:
             return await interaction.followup.send(f"❌ Ошибка выдачи роли: {e}", ephemeral=True)
+
+        # снимаем роль кандидата
+        await remove_candidate_role(guild, applicant_id, reason=f"Заявка принята ({interaction.user})")
 
         await channel.send(f"✅ Заявка **принята**. Роль выдана. Модератор: {interaction.user.mention}")
         await send_log(guild, f"✅ Принято: {channel.mention} | заявитель {applicant_id} | модер {interaction.user}")
@@ -123,8 +157,12 @@ class TicketReviewView(discord.ui.View):
         if guild is None or not isinstance(channel, discord.TextChannel):
             return await interaction.followup.send("❌ Ошибка контекста.", ephemeral=True)
 
+        applicant_id = extract_user_id_from_topic(channel.topic)
+        if applicant_id is not None:
+            await remove_candidate_role(guild, applicant_id, reason=f"Заявка отклонена ({interaction.user})")
+
         await channel.send(f"❌ Заявка **отклонена**. Модератор: {interaction.user.mention}")
-        await send_log(guild, f"❌ Отказ: {channel.mention} | модер {interaction.user}")
+        await send_log(guild, f"❌ Отказ: {channel.mention} | заявитель {applicant_id} | модер {interaction.user}")
 
         asyncio.create_task(delete_channel_later(channel, DELETE_DELAY_SECONDS, "Ticket rejected - auto delete"))
         await interaction.followup.send(f"Готово ✅ Канал удалится через {DELETE_DELAY_SECONDS} сек.", ephemeral=True)
@@ -248,7 +286,7 @@ class ApplyModalPage2(discord.ui.Modal, title="Заявка в семью (2/2)"
             return await interaction.response.send_message("Это работает только на сервере.", ephemeral=True)
 
         if CATEGORY_ID == 0 or STAFF_ROLE_ID == 0:
-            return await interaction.response.send_message("❌ Проверь CATEGORY_ID и STAFF_ROLE_ID в .env", ephemeral=True)
+            return await interaction.response.send_message("❌ Проверь CATEGORY_ID и STAFF_ROLE_ID в env", ephemeral=True)
 
         category = guild.get_channel(CATEGORY_ID)
         staff_role = guild.get_role(STAFF_ROLE_ID)
@@ -267,7 +305,6 @@ class ApplyModalPage2(discord.ui.Modal, title="Заявка в семью (2/2)"
 
         ticket_name = f"{TICKET_PREFIX}-{slugify(self.page1['nick'])}"
 
-        # ВАЖНО: автор заявки видит канал и может писать (уже было — оставляем)
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -283,7 +320,6 @@ class ApplyModalPage2(discord.ui.Modal, title="Заявка в семью (2/2)"
             reason="Создание тикета",
         )
 
-        # ======= Красивый embed =======
         embed = discord.Embed(
             title="📋 Заявка в семью",
             description=f"**Заявитель:** {interaction.user.mention}\nТикет: `{channel.name}`",
@@ -307,23 +343,22 @@ class ApplyModalPage2(discord.ui.Modal, title="Заявка в семью (2/2)"
             f"**10. Почему хотите к нам крутым?:** {(self.q10_why.value or '—')}"
         )
 
-        # В один блок (если вдруг будет слишком длинно — Discord ограничит 1024, тогда ниже дам вариант 2)
         embed.add_field(name="Ответы", value=answers[:1024], inline=False)
 
-        # Если 9-10 длинные — лучше отдельно (без лишней хуйни, просто чтобы не резалось)
         if len(answers) > 1024:
             embed.add_field(name="9. Расскажи о себе еблан", value=(self.q9_exp.value or "—")[:1024], inline=False)
-            embed.add_field(name="10. Почему хотите к нам крутым?", value=(self.q10_why.value or "—")[:1024],
-                            inline=False)
+            embed.add_field(name="10. Почему хотите к нам крутым?", value=(self.q10_why.value or "—")[:1024], inline=False)
 
         embed.set_footer(text="Кнопки ниже: принять / отказать / вызвать на обзвон.")
 
-        # ТЕГАЕМ И СТАФФ, И АВТОРА (чтобы он сразу увидел канал)
         await channel.send(
             content=f"{interaction.user.mention} {staff_role.mention}\nНовая заявка 👇",
             embed=embed,
             view=TicketReviewView()
         )
+
+        # выдаём роль кандидата сразу после подачи заявки
+        await add_candidate_role(guild, interaction.user.id, reason="Заявка подана (кандидат в фаму)")
 
         await send_log(guild, f"📩 Создан тикет {channel.mention} от {interaction.user}.")
         await interaction.response.send_message(f"✅ Заявка отправлена! Канал: {channel.mention}", ephemeral=True)
@@ -379,7 +414,7 @@ async def resync(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     if GUILD_ID == 0:
-        return await interaction.followup.send("❌ В .env нет GUILD_ID", ephemeral=True)
+        return await interaction.followup.send("❌ В env нет GUILD_ID", ephemeral=True)
 
     guild = discord.Object(id=GUILD_ID)
     bot.tree.clear_commands(guild=guild)
@@ -390,9 +425,9 @@ async def resync(interaction: discord.Interaction):
 
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN не найден. Проверь .env")
+    raise RuntimeError("DISCORD_TOKEN не найден. Проверь переменные окружения на хостинге (ENV).")
 
 if GUILD_ID == 0:
-    print("⚠️ GUILD_ID=0. Лучше прописать GUILD_ID в .env, чтобы команды появлялись сразу.")
+    print("⚠️ GUILD_ID=0. Лучше прописать GUILD_ID в env, чтобы команды появлялись сразу.")
 
 bot.run(TOKEN)
